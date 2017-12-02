@@ -14,3 +14,8 @@
 .glide/
 
 .idea/
+
+# bbuilt binary
+[Bb]in/
+[Pp]kg/
+
