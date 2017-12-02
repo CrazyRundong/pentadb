@@ -13,3 +13,7 @@
 [submodule "goleveldb"]
     path = src/github.com/syndtr/goleveldb
     url = https://github.com/syndtr/goleveldb
+[submodule "etcd"]
+    path = src/github.com/coreos/etcd
+    url = https://github.com/coreos/etcd
+
