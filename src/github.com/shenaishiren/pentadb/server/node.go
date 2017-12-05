@@ -73,10 +73,10 @@ type Node struct {
 	mutex *sync.RWMutex // read-write lock
 
 	// use these channels to communicate with raft cluster
-	chanPropose <-chan string
+	chanPropose chan<- string
 	// load from raft cluster
-	chanCommit chan<- string
-	chanError  chan<- error
+	chanCommit <-chan string
+	chanError  <-chan error
 }
 
 // TODO(Rundong): get bool: isJoin, []uint64: peers
@@ -222,16 +222,16 @@ func (rn *Node) handleCommit() error {
 			return errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, rn.Ipaddr))
 		}
 	}
-	defer close(rn.chanCommit)
 	return nil
 }
 
 func (rn *Node) handleError() error {
 	// TODO
 	for err := range rn.chanError {
-
+		if err != nil {
+			return err
+		}
 	}
-	defer close(rn.chanError)
 	return nil
 }
 
