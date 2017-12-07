@@ -12,5 +12,10 @@
 
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
-
 .idea/
+.vscode/
+
+# bbuilt binary
+[Bb]in/
+[Pp]kg/
+

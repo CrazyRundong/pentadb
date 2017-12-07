@@ -37,10 +37,17 @@ import (
 	"sync"
 	"errors"
 	"math/rand"
+	"fmt"
+	"bytes"
+	"net"
+	"encoding/gob"
+	"encoding/binary"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/shenaishiren/pentadb/args"
 	"github.com/shenaishiren/pentadb/log"
-	"fmt"
+	"github.com/shenaishiren/pentadb/raft"
+	"strings"
+	"strconv"
 )
 
 var LOG = log.DefaultLog
@@ -48,7 +55,7 @@ var LOG = log.DefaultLog
 type NodeStatus int
 
 const (
-	Running NodeStatus = iota
+	Running  NodeStatus = iota
 	Terminal
 )
 
@@ -63,15 +70,47 @@ type Node struct {
 
 	DB *leveldb.DB
 
-	mutex *sync.RWMutex   // read-write lock
+	mutex *sync.RWMutex // read-write lock
+
+	// use these channels to communicate with raft cluster
+	chanPropose chan<- string
+	// load from raft cluster
+	chanCommit <-chan string
+	chanError  <-chan error
 }
 
-func NewNode(ipaddr string) *Node {
-	return &Node {
-		Ipaddr: ipaddr,
-		State: Running,
-		mutex: new(sync.RWMutex),
+// TODO(Rundong): get bool: isJoin, []uint64: peers
+// do peers check when join to a cluster, maybe check ont peer's
+// `peers` filed?
+func NewNode(ipaddr string, isJoin bool, peers []string) (*Node, error) {
+	var (
+		err    error
+		nodeId uint64
+	)
+	peersId := make([]uint64, len(peers))
+	for i, p := range peers {
+		peersId[i], err = ipToNodeId(p)
+		if err != nil {
+			return nil, err
+		}
 	}
+	if nodeId, err = ipToNodeId(ipaddr); err != nil {
+		return nil, err
+	}
+
+	chanPropose := make(chan string)
+	chanCommit, chanError := raft.NewRaftNode(nodeId, peersId, isJoin, chanPropose)
+
+	return &Node{
+		Ipaddr: ipaddr,
+		State:  Running,
+		mutex:  new(sync.RWMutex),
+
+		// bellow are channels for kv-node <-> Raft cluster
+		chanPropose: chanPropose,
+		chanCommit:  chanCommit,
+		chanError:   chanError,
+	}, nil
 }
 
 func (n *Node) randomChoice(list []string, k int) []string {
@@ -81,7 +120,7 @@ func (n *Node) randomChoice(list []string, k int) []string {
 	for i := 0; i < k; i++ {
 		j := rand.Intn(p - i)
 		result[i] = pool[j]
-		pool[j] = result[p - i - 1]
+		pool[j] = result[p-i-1]
 	}
 	return result
 }
@@ -124,7 +163,7 @@ func (n *Node) RemoveNode(node string, result *[]byte) error {
 		}
 	}
 	if flag {
-		n.OtherNodes = n.OtherNodes[0:len(n.OtherNodes) - 1]
+		n.OtherNodes = n.OtherNodes[0:len(n.OtherNodes)-1]
 	}
 	return nil
 }
@@ -152,4 +191,75 @@ func (n *Node) Delete(key []byte, result *[]byte) error {
 
 	err := n.DB.Delete(key, nil)
 	return err
+}
+
+func (rn *Node) Propose(op raft.OpLog) error {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(op); err != nil {
+		return err
+	}
+	rn.chanPropose <- buf.String()
+	return nil
+}
+
+func (rn *Node) handleCommit() error {
+	for data := range rn.chanCommit {
+		var kvOp raft.OpLog
+		if err := gob.NewDecoder(bytes.NewBufferString(data)).Decode(&kvOp); err != nil {
+			return err
+		}
+		switch kvOp.Op {
+		case raft.Get:
+		case raft.Put:
+			rn.mutex.Lock()
+			rn.DB.Put([]byte(kvOp.Key), []byte(kvOp.Val), nil)
+			rn.mutex.Unlock()
+		case raft.Del:
+			rn.mutex.Lock()
+			rn.DB.Delete([]byte(kvOp.Key), nil)
+			rn.mutex.Unlock()
+		default:
+			return errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, rn.Ipaddr))
+		}
+	}
+	return nil
+}
+
+func (rn *Node) handleError() error {
+	// TODO
+	for err := range rn.chanError {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ipToNodeId(ipAdd string) (uint64, error) {
+	ipToken := strings.Split(ipAdd, ":")
+	ip := net.ParseIP(ipToken[0])
+	port, err := strconv.Atoi(ipToken[1])
+	if ip == nil || err != nil {
+		return -1, errors.New(fmt.Sprintf("Can't parse ip add: %s", ipAdd))
+	}
+
+	var nodeId uint64
+	ipNum := ip2int(ip)
+	nodeId = uint64(ipNum)<<32 + uint64(port)
+
+	return nodeId, nil
+}
+
+// thanks to: https://gist.github.com/ammario/649d4c0da650162efd404af23e25b86b
+func ip2int(ip net.IP) uint32 {
+	if len(ip) == 16 {
+		return binary.BigEndian.Uint32(ip[12:16])
+	}
+	return binary.BigEndian.Uint32(ip)
+}
+
+func int2ip(nn uint32) net.IP {
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, nn)
+	return ip
 }
