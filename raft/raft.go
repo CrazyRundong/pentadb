@@ -1,6 +1,5 @@
 package raft
 
-// TODO
 import (
 	"bytes"
 	"context"
@@ -172,7 +171,7 @@ func (rn *raftNode) prepareWal() (*cRaftWal.WAL, error) {
 	if len(entries) > 0 {
 		rn.committedEntryIdx = entries[len(entries)-1].Index
 	} else {
-		rn.chanCommit <- nil
+		rn.chanCommit <- ""
 	}
 
 	return w, nil

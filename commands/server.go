@@ -34,17 +34,20 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 package main
 
 import (
-	"net"
-	"fmt"
 	"flag"
-	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/shenaishiren/pentadb/rpc"
+	"fmt"
+	"log"
+	"net"
+	"strings"
+
+	pLog "github.com/shenaishiren/pentadb/log"
 	"github.com/shenaishiren/pentadb/opt"
+	"github.com/shenaishiren/pentadb/rpc"
 	"github.com/shenaishiren/pentadb/server"
-	"github.com/shenaishiren/pentadb/log"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
-var LOG = log.DefaultLog
+var LOG = pLog.DefaultLog
 
 var helpPrompt = `Usage: pentadb [--port <port>] [--path <path>] [options]
 
@@ -60,8 +63,16 @@ type Server struct {
 	Node *server.Node
 }
 
-func (s *Server) listen(port string, path string) {
-	s.Node = server.NewNode(":" + port)
+func (s *Server) listen(hostIP string, isJoin bool, peers []string, path string) {
+	var (
+		err error
+	)
+	port := strings.Split(hostIP, ":")[1]
+
+	if s.Node, err = server.NewNode(hostIP, isJoin, peers); err != nil {
+		log.Panicf("fail to initalize reft server node: %s", err.Error())
+	}
+
 	db, err := leveldb.OpenFile(path, nil)
 
 	if err != nil {
@@ -92,11 +103,15 @@ func (s *Server) listen(port string, path string) {
 func main() {
 	var (
 		help bool
+		isJoin bool
+		peers string
 		port string
 		path string
 	)
 	flag.BoolVar(&help, "h", false, "Display this help message and exit")
-	flag.StringVar(&port, "p", "4567", "The port to listen on (default: 4567)")
+	flag.BoolVar(&isJoin, "j", false, "whether to join another running cluster")
+	flag.StringVar(&peers, "p", "", "ip:port of peers, separated by `,`")
+	flag.StringVar(&port, "P", "4567", "The port to listen on (default: 4567)")
 	flag.StringVar(&path, "a", opt.DeafultPath, "The path to use for the LevelDB store")
 
 	// change default usage
@@ -111,7 +126,23 @@ func main() {
 	if help {
 		fmt.Print(helpPrompt)
 	} else {
+		var (
+			hostIP string
+			peerIP []string
+		)
+
+		if ip, err := server.GetMyIP(); err != nil {
+			log.Panicf("fail to get server host ip: %s", err.Error())
+		} else {
+			hostIP = ip[0].String()
+			hostIP += ":" + port
+		}
+
+		if isJoin {
+			peerIP = strings.Split(peers, ",")
+		}
+
 		svr := new(Server)
-		svr.listen(port, path)
+		svr.listen(hostIP, isJoin, peerIP, path)
 	}
 }

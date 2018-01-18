@@ -34,20 +34,21 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 package server
 
 import (
-	"sync"
-	"errors"
-	"math/rand"
-	"fmt"
 	"bytes"
-	"net"
-	"encoding/gob"
 	"encoding/binary"
-	"github.com/syndtr/goleveldb/leveldb"
+	"encoding/gob"
+	"errors"
+	"fmt"
+	"math/rand"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+
 	"github.com/shenaishiren/pentadb/args"
 	"github.com/shenaishiren/pentadb/log"
 	"github.com/shenaishiren/pentadb/raft"
-	"strings"
-	"strconv"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 var LOG = log.DefaultLog
@@ -82,19 +83,20 @@ type Node struct {
 // TODO(Rundong): get bool: isJoin, []uint64: peers
 // do peers check when join to a cluster, maybe check ont peer's
 // `peers` filed?
-func NewNode(ipaddr string, isJoin bool, peers []string) (*Node, error) {
+func NewNode(hostIP string, isJoin bool, peers []string) (*Node, error) {
 	var (
 		err    error
 		nodeId uint64
 	)
 	peersId := make([]uint64, len(peers))
+
 	for i, p := range peers {
 		peersId[i], err = ipToNodeId(p)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if nodeId, err = ipToNodeId(ipaddr); err != nil {
+	if nodeId, err = ipToNodeId(hostIP); err != nil {
 		return nil, err
 	}
 
@@ -102,7 +104,7 @@ func NewNode(ipaddr string, isJoin bool, peers []string) (*Node, error) {
 	chanCommit, chanError := raft.NewRaftNode(nodeId, peersId, isJoin, chanPropose)
 
 	return &Node{
-		Ipaddr: ipaddr,
+		Ipaddr: hostIP,
 		State:  Running,
 		mutex:  new(sync.RWMutex),
 
@@ -169,11 +171,20 @@ func (n *Node) RemoveNode(node string, result *[]byte) error {
 }
 
 func (n *Node) Put(args *args.KVArgs, result *[]byte) error {
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
+	var (
+		err error
+		putLog raft.OpLog
+		logBuf bytes.Buffer
+	)
 
-	err := n.DB.Put(args.Key, args.Value, nil)
-	return err
+	putLog = raft.OpLog{Op:raft.Put, Key:args.Key, Val:args.Value}
+	if err = gob.NewEncoder(&logBuf).Encode(putLog); err != nil {
+		return err
+	}
+
+	n.chanPropose <- logBuf.String()
+
+	return nil
 }
 
 func (n *Node) Get(key []byte, result *[]byte) error {
@@ -185,20 +196,20 @@ func (n *Node) Get(key []byte, result *[]byte) error {
 	return err
 }
 
-func (n *Node) Delete(key []byte, result *[]byte) error {
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
+func (n *Node) Delete(key string, result *[]byte) error {
+	var (
+		err    error
+		delLog raft.OpLog
+		logBuf bytes.Buffer
+	)
 
-	err := n.DB.Delete(key, nil)
-	return err
-}
-
-func (rn *Node) Propose(op raft.OpLog) error {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(op); err != nil {
+	delLog = raft.OpLog{Op:raft.Del, Key:key, Val:""}
+	if err = gob.NewEncoder(&logBuf).Encode(delLog); err != nil {
 		return err
 	}
-	rn.chanPropose <- buf.String()
+
+	n.chanPropose <- logBuf.String()
+
 	return nil
 }
 
@@ -218,6 +229,8 @@ func (rn *Node) handleCommit() error {
 			rn.mutex.Lock()
 			rn.DB.Delete([]byte(kvOp.Key), nil)
 			rn.mutex.Unlock()
+		case raft.DoSnap:
+			// TODO: handle snapshot
 		default:
 			return errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, rn.Ipaddr))
 		}
@@ -240,7 +253,7 @@ func ipToNodeId(ipAdd string) (uint64, error) {
 	ip := net.ParseIP(ipToken[0])
 	port, err := strconv.Atoi(ipToken[1])
 	if ip == nil || err != nil {
-		return -1, errors.New(fmt.Sprintf("Can't parse ip add: %s", ipAdd))
+		return 0, errors.New(fmt.Sprintf("Can't parse ip add: %s", ipAdd))
 	}
 
 	var nodeId uint64

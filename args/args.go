@@ -44,9 +44,8 @@ type InitArgs struct {
 }
 
 type KVArgs struct {
-	Key []byte
-
-	Value []byte
+	Key string
+	Value string
 }
 
 type KVArrayArgs struct {
