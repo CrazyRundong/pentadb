@@ -99,7 +99,7 @@ func (rn *raftNode) startRaft(isJoin bool) {
 	)
 	// prepare local persistent storage
 	if !cRaftFileUtil.Exist(rn.snapDir) {
-		if err := os.Mkdir(rn.snapDir, 0750); err != nil {
+		if err := os.MkdirAll(rn.snapDir, 0750); err != nil {
 			log.Panicf("can't create snapshot dir for node %d: %s", rn.id, err.Error())
 		}
 	}
@@ -269,8 +269,7 @@ func (rn *raftNode) runRaft() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	cPropError := make(chan error)
-	go rn.handlePropose(cPropError)
+	go rn.handlePropose()
 
 	for {
 		select {
@@ -288,7 +287,6 @@ func (rn *raftNode) runRaft() {
 			rn.transport.Send(rd.Messages)
 			if err := rn.makeCommit(rn.entriesToApply(rd.Entries)); err != nil {
 				rn.chanError <- err
-				log.Fatalf("raft node #%d: %s", rn.id, err.Error())
 			}
 			// TODO: maybe trigger snapshot
 			rn.node.Advance()
@@ -296,22 +294,18 @@ func (rn *raftNode) runRaft() {
 		case err := <-rn.transport.ErrorC:
 			rn.chanError <- err
 			// TODO: stop raft node
-
-		case err := <-cPropError:
-			rn.chanError <- err
 		}
 	}
 
 }
 
-func (rn *raftNode) handlePropose(cError chan<- error) {
-	defer close(cError)
+func (rn *raftNode) handlePropose() {
 	for rn.chanPropose != nil {
 		select {
 		case prop, ok := <-rn.chanPropose:
 			if !ok {
 				rn.chanPropose = nil
-				cError <- fmt.Errorf("raft node #%d: chanPropose closed", rn.id)
+				rn.chanError <- fmt.Errorf("raft node #%d: chanPropose closed", rn.id)
 			} else {
 				rn.node.Propose(context.TODO(), []byte(prop))
 			}
@@ -362,7 +356,7 @@ func (rn *raftNode) makeCommit(ents []cRaftpb.Entry, err error) error {
 
 func (rn *raftNode) entriesToApply(ents []cRaftpb.Entry) ([]cRaftpb.Entry, error) {
 	if len(ents) == 0 {
-		return nil, fmt.Errorf("no entries to apply")
+		return nil, nil
 	}
 	if ents[0].Index > rn.appliedIdx+1 {
 		return nil, fmt.Errorf("first entry idx #%d must follows last applied idx #%d", ents[0].Index, rn.appliedIdx)

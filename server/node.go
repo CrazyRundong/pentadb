@@ -72,9 +72,10 @@ type Node struct {
 	snapShotter  *cRaftSnap.Snapshotter
 
 	// use these channels to communicate with raft cluster
-	chanPropose chan<- string
-	chanCommit  <-chan *string
-	chanError   <-chan error
+	chanPropose       chan<- string
+	chanCommit        <-chan *string
+	chanError         <-chan error
+	chanInternalError chan error
 }
 
 // TODO(Rundong): get bool: isJoin, []uint64: peers
@@ -106,10 +107,11 @@ func NewNode(hostIP, basePath string, isJoin bool, peers []string) (*Node, error
 		mutex:  new(sync.RWMutex),
 
 		// bellow are channels for kv-node <-> Raft cluster
-		chanPropose: chanPropose,
-		chanCommit:  chanCommit,
-		chanError:   chanError,
-		snapShotter: <-snapShotter,
+		chanPropose:       chanPropose,
+		chanCommit:        chanCommit,
+		chanError:         chanError,
+		chanInternalError: make(chan error),
+		snapShotter:       <-snapShotter,
 	}, nil
 }
 
@@ -211,11 +213,11 @@ func (n *Node) Delete(key string, result *[]byte) error {
 	return nil
 }
 
-func (n *Node) HandleCommit() error {
+func (n *Node) HandleCommit() {
 	for data := range n.chanCommit {
 		var kvOp raft.OpLog
 		if err := gob.NewDecoder(bytes.NewBufferString(*data)).Decode(&kvOp); err != nil {
-			return err
+			n.chanInternalError <- err
 		}
 		switch kvOp.Op {
 		case raft.Get:
@@ -230,21 +232,24 @@ func (n *Node) HandleCommit() error {
 		case raft.DoSnap:
 			// TODO: handle snapshot
 		default:
-			return errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, n.HostIP))
+			err := errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, n.HostIP))
+			n.chanInternalError <- err
 		}
 	}
-	return nil
 }
 
-func (n *Node) handleError() error {
-	for err := range n.chanError {
-		if err != nil {
-			return err
+func (n *Node) HandleError() {
+	var (
+		err error
+	)
+	for {
+		select {
+		case err = <-n.chanError:
+			LOG.Errorf("kv-storage get error from raft node: %s", err)
+		case err = <-n.chanInternalError:
+			LOG.Errorf("kv-storage get error from raft node: %s", err)
 		}
-		// TODO
-		LOG.Errorf("kv-storage get error from raft node: %s", err)
 	}
-	return nil
 }
 
 func (n *Node) doSnapshot() ([]byte, error) {

@@ -83,6 +83,7 @@ func (s *Server) listen(hostIP string, isJoin bool, peers []string, path string)
 
 	rpc.Register(s.Node)
 	go s.Node.HandleCommit()
+	go s.Node.HandleError()
 
 	l, err := net.Listen("tcp", ":" + port)
 	if err != nil {
