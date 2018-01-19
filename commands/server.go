@@ -69,18 +69,20 @@ func (s *Server) listen(hostIP string, isJoin bool, peers []string, path string)
 	)
 	port := strings.Split(hostIP, ":")[1]
 
-	if s.Node, err = server.NewNode(hostIP, isJoin, peers); err != nil {
+	if s.Node, err = server.NewNode(hostIP, path, isJoin, peers); err != nil {
 		log.Panicf("fail to initalize reft server node: %s", err.Error())
 	}
 
-	db, err := leveldb.OpenFile(path, nil)
+	db, err := leveldb.OpenFile(path + "/localDB", nil)
 
 	if err != nil {
 		LOG.Error("open levelDB error: ", err.Error())
 		return
 	}
 	s.Node.DB = db
+
 	rpc.Register(s.Node)
+	go s.Node.HandleCommit()
 
 	l, err := net.Listen("tcp", ":" + port)
 	if err != nil {

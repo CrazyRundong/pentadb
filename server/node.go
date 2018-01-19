@@ -37,6 +37,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -45,6 +46,7 @@ import (
 	"strings"
 	"sync"
 
+	cRaftSnap "github.com/coreos/etcd/snap"
 	"github.com/shenaishiren/pentadb/args"
 	"github.com/shenaishiren/pentadb/log"
 	"github.com/shenaishiren/pentadb/raft"
@@ -61,29 +63,24 @@ const (
 )
 
 type Node struct {
-	Ipaddr string
-
-	State NodeStatus
-
-	OtherNodes []string
-
+	HostIP       string
+	State        NodeStatus
+	OtherNodes   []string
 	ReplicaNodes []string
-
-	DB *leveldb.DB
-
-	mutex *sync.RWMutex // read-write lock
+	DB           *leveldb.DB
+	mutex        *sync.RWMutex // read-write lock
+	snapShotter  *cRaftSnap.Snapshotter
 
 	// use these channels to communicate with raft cluster
 	chanPropose chan<- string
-	// load from raft cluster
-	chanCommit <-chan string
-	chanError  <-chan error
+	chanCommit  <-chan *string
+	chanError   <-chan error
 }
 
 // TODO(Rundong): get bool: isJoin, []uint64: peers
 // do peers check when join to a cluster, maybe check ont peer's
 // `peers` filed?
-func NewNode(hostIP string, isJoin bool, peers []string) (*Node, error) {
+func NewNode(hostIP, basePath string, isJoin bool, peers []string) (*Node, error) {
 	var (
 		err    error
 		nodeId uint64
@@ -101,10 +98,10 @@ func NewNode(hostIP string, isJoin bool, peers []string) (*Node, error) {
 	}
 
 	chanPropose := make(chan string)
-	chanCommit, chanError := raft.NewRaftNode(nodeId, peersId, isJoin, chanPropose)
+	chanCommit, chanError, snapShotter := raft.NewRaftNode(nodeId, basePath, peersId, isJoin, chanPropose)
 
 	return &Node{
-		Ipaddr: hostIP,
+		HostIP: hostIP,
 		State:  Running,
 		mutex:  new(sync.RWMutex),
 
@@ -112,6 +109,7 @@ func NewNode(hostIP string, isJoin bool, peers []string) (*Node, error) {
 		chanPropose: chanPropose,
 		chanCommit:  chanCommit,
 		chanError:   chanError,
+		snapShotter: <-snapShotter,
 	}, nil
 }
 
@@ -131,13 +129,13 @@ func (n *Node) Init(args *args.InitArgs, result *[]byte) error {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
-	n.Ipaddr = args.Self
+	n.HostIP = args.Self
 	n.OtherNodes = args.OtherNodes
 	replicaNodes := n.randomChoice(args.OtherNodes, args.Replicas)
 	if len(replicaNodes) == 0 {
-		return errors.New(fmt.Sprintf("node %s init failed", n.Ipaddr))
+		return errors.New(fmt.Sprintf("node %s init failed", n.HostIP))
 	}
-	replicaNodes = append(replicaNodes, n.Ipaddr)
+	replicaNodes = append(replicaNodes, n.HostIP)
 	n.ReplicaNodes = replicaNodes
 	return nil
 }
@@ -172,12 +170,12 @@ func (n *Node) RemoveNode(node string, result *[]byte) error {
 
 func (n *Node) Put(args *args.KVArgs, result *[]byte) error {
 	var (
-		err error
+		err    error
 		putLog raft.OpLog
 		logBuf bytes.Buffer
 	)
 
-	putLog = raft.OpLog{Op:raft.Put, Key:args.Key, Val:args.Value}
+	putLog = raft.OpLog{Op: raft.Put, Key: args.Key, Val: args.Value}
 	if err = gob.NewEncoder(&logBuf).Encode(putLog); err != nil {
 		return err
 	}
@@ -203,7 +201,7 @@ func (n *Node) Delete(key string, result *[]byte) error {
 		logBuf bytes.Buffer
 	)
 
-	delLog = raft.OpLog{Op:raft.Del, Key:key, Val:""}
+	delLog = raft.OpLog{Op: raft.Del, Key: key, Val: ""}
 	if err = gob.NewEncoder(&logBuf).Encode(delLog); err != nil {
 		return err
 	}
@@ -213,39 +211,47 @@ func (n *Node) Delete(key string, result *[]byte) error {
 	return nil
 }
 
-func (rn *Node) handleCommit() error {
-	for data := range rn.chanCommit {
+func (n *Node) HandleCommit() error {
+	for data := range n.chanCommit {
 		var kvOp raft.OpLog
-		if err := gob.NewDecoder(bytes.NewBufferString(data)).Decode(&kvOp); err != nil {
+		if err := gob.NewDecoder(bytes.NewBufferString(*data)).Decode(&kvOp); err != nil {
 			return err
 		}
 		switch kvOp.Op {
 		case raft.Get:
 		case raft.Put:
-			rn.mutex.Lock()
-			rn.DB.Put([]byte(kvOp.Key), []byte(kvOp.Val), nil)
-			rn.mutex.Unlock()
+			n.mutex.Lock()
+			n.DB.Put([]byte(kvOp.Key), []byte(kvOp.Val), nil)
+			n.mutex.Unlock()
 		case raft.Del:
-			rn.mutex.Lock()
-			rn.DB.Delete([]byte(kvOp.Key), nil)
-			rn.mutex.Unlock()
+			n.mutex.Lock()
+			n.DB.Delete([]byte(kvOp.Key), nil)
+			n.mutex.Unlock()
 		case raft.DoSnap:
 			// TODO: handle snapshot
 		default:
-			return errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, rn.Ipaddr))
+			return errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, n.HostIP))
 		}
 	}
 	return nil
 }
 
-func (rn *Node) handleError() error {
-	// TODO
-	for err := range rn.chanError {
+func (n *Node) handleError() error {
+	for err := range n.chanError {
 		if err != nil {
 			return err
 		}
+		// TODO
+		LOG.Errorf("kv-storage get error from raft node: %s", err)
 	}
 	return nil
+}
+
+func (n *Node) doSnapshot() ([]byte, error) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	return json.Marshal(n.DB)
 }
 
 func ipToNodeId(ipAdd string) (uint64, error) {

@@ -41,19 +41,18 @@ type raftNode struct {
 	// chanPropose: come from kv-server
 	chanPropose <-chan string
 	// chanCommit & chanError: to kv-server
-	chanCommit chan<- string
+	chanCommit chan<- *string
 	chanError  chan<- error
 
-	id                uint64
-	peers             []uint64 // ? maybe uint64
-	node              cRaft.Node
-	nodeStorage       *cRaft.MemoryStorage
-	committedEntryIdx uint64
+	id          uint64
+	peers       []uint64 // ? maybe uint64
+	node        cRaft.Node
+	nodeStorage *cRaft.MemoryStorage
 
 	// entries for configuration state
-	confState   cRaftpb.ConfState
-	snapshotIdx uint64
-	appliedIdx  uint64
+	snapshotIdx       uint64
+	appliedIdx        uint64
+	committedEntryIdx uint64
 
 	// TODO(Rundong): re-implement all bellow utils
 	// use etcd.WAL to store Committed data
@@ -61,85 +60,95 @@ type raftNode struct {
 	snapDir              string
 	snapShotter          *cRaftSnap.Snapshotter
 	chanSnapShotterReady chan *cRaftSnap.Snapshotter
-
-	nodeWalDir string
-	nodeWal    *cRaftWal.WAL
+	confState            cRaftpb.ConfState
+	nodeWalDir           string
+	nodeWal              *cRaftWal.WAL
 
 	// use etcd.httpraft to communicates though raft cluster
 	transport *cRaftHttp.Transport
 }
 
-func NewRaftNode(id uint64, peers []uint64, isJoin bool, chanPropose <-chan string) (<-chan string, <-chan error) {
+func NewRaftNode(id uint64, basePath string, peers []uint64, isJoin bool, chanPropose <-chan string) (<-chan *string, <-chan error, <-chan *cRaftSnap.Snapshotter) {
+	memStorage := cRaft.NewMemoryStorage()
+	chanCommit := make(chan *string)
+	chanError := make(chan error)
+	chanSnapShotterReady := make(chan *cRaftSnap.Snapshotter, 1)
+	rNode := &raftNode{
+		chanPropose:          chanPropose,
+		chanCommit:           chanCommit,
+		chanError:            chanError,
+		chanSnapShotterReady: chanSnapShotterReady,
+		id:                   id,
+		peers:                peers,
+		nodeStorage:          memStorage,
+		snapshotIdx:          0,
+		appliedIdx:           0,
+		committedEntryIdx:    0,
+		snapDir:              fmt.Sprintf("%s/kvNode_%d", basePath, id),
+		nodeWalDir:           fmt.Sprintf("%s/kvNode_%d_Wal", basePath, id),
+	}
+
+	go rNode.startRaft(isJoin)
+
+	return chanCommit, chanError, chanSnapShotterReady
+}
+
+func (rn *raftNode) startRaft(isJoin bool) {
 	var (
 		err error
 	)
-
-	memStorage := cRaft.NewMemoryStorage()
-	chanCommit := make(chan string)
-	chanError := make(chan error)
-	rNode := &raftNode{
-		chanPropose:       chanPropose,
-		chanCommit:        chanCommit,
-		chanError:         chanError,
-		id:                id,
-		peers:             peers,
-		nodeStorage:       memStorage,
-		committedEntryIdx: 0,
-		snapDir:           fmt.Sprintf("kvNode_%d", id),
-		nodeWalDir:        fmt.Sprintf("kvNode_%d_Wal", id),
-	}
-
 	// prepare local persistent storage
-	if !cRaftFileUtil.Exist(rNode.snapDir) {
-		if err := os.Mkdir(rNode.snapDir, 0750); err != nil {
-			log.Fatalf("Can't create snapshot dir for node %d: %s", id, rNode.snapDir)
+	if !cRaftFileUtil.Exist(rn.snapDir) {
+		if err := os.Mkdir(rn.snapDir, 0750); err != nil {
+			log.Panicf("can't create snapshot dir for node %d: %s", rn.id, err.Error())
 		}
 	}
-	rNode.snapShotter = cRaftSnap.New(rNode.snapDir)
-	rNode.chanSnapShotterReady <- rNode.snapShotter
-
-	isOldWalExists := cRaftWal.Exist(rNode.nodeWalDir)
-	if rNode.nodeWal, err = rNode.prepareWal(); err != nil {
-		log.Fatal(err)
+	rn.snapShotter = cRaftSnap.New(rn.snapDir)
+	rn.chanSnapShotterReady <- rn.snapShotter
+	isOldWalExists := cRaftWal.Exist(rn.nodeWalDir)
+	if rn.nodeWal, err = rn.prepareWal(); err != nil {
+		log.Panic(err)
 	}
-
 	// build cRaft.Node
 	var cRaftClusterPeers []cRaft.Peer
 	c := &cRaft.Config{
-		ID:            rNode.id,
-		Storage:       rNode.nodeStorage,
-		ElectionTick:  10,
-		HeartbeatTick: 1,
+		ID:              rn.id,
+		Storage:         rn.nodeStorage,
+		ElectionTick:    10,
+		HeartbeatTick:   1,
+		MaxSizePerMsg:   4096,
+		MaxInflightMsgs: 256,
 	}
-
 	if isOldWalExists {
-		rNode.node = cRaft.RestartNode(c)
+		rn.node = cRaft.RestartNode(c)
 	} else {
 		if isJoin {
 			cRaftClusterPeers = nil
 		} else {
-			cRaftClusterPeers = make([]cRaft.Peer, len(rNode.peers))
-			for i, p := range rNode.peers {
+			numPeers := len(rn.peers)
+			cRaftClusterPeers = make([]cRaft.Peer, numPeers)
+
+			if numPeers == 0 {
+				cRaftClusterPeers = append(cRaftClusterPeers, cRaft.Peer{ID: rn.id})
+			}
+			for i, p := range rn.peers {
 				cRaftClusterPeers[i] = cRaft.Peer{ID: p}
 			}
 		}
-		rNode.node = cRaft.StartNode(c, cRaftClusterPeers)
+		rn.node = cRaft.StartNode(c, cRaftClusterPeers)
 	}
-
 	// launch HTTP transport between nodes
-	rNode.transport = &cRaftHttp.Transport{
-		ID:          cRaftTypes.ID(rNode.id),
+	rn.transport = &cRaftHttp.Transport{
+		ID:          cRaftTypes.ID(rn.id),
 		ClusterID:   0x001,
-		Raft:        rNode,
+		Raft:        rn,
 		ServerStats: cRaftStats.NewServerStats("", ""),
-		LeaderStats: cRaftStats.NewLeaderStats(strconv.FormatUint(rNode.id, 10)),
+		LeaderStats: cRaftStats.NewLeaderStats(strconv.FormatUint(rn.id, 10)),
 		ErrorC:      make(chan error),
 	}
-
 	// TODO(Rundong): launch raft service
-	go rNode.runRaft()
-
-	return chanCommit, chanError
+	go rn.runRaft()
+	log.Printf("raft node #%d start working", rn.id)
 }
 
 func (rn *raftNode) prepareWal() (*cRaftWal.WAL, error) {
@@ -150,9 +159,8 @@ func (rn *raftNode) prepareWal() (*cRaftWal.WAL, error) {
 		hardState cRaftpb.HardState
 		entries   []cRaftpb.Entry
 	)
-	if snapShot, err = rn.snapShotter.Load(); err != nil && err != cRaftSnap.ErrNoSnapshot {
-		return nil, err
-	}
+
+	snapShot = rn.loadSnapshot()
 	if w, err = rn.openWAL(snapShot); err != nil {
 		return nil, err
 	}
@@ -171,7 +179,13 @@ func (rn *raftNode) prepareWal() (*cRaftWal.WAL, error) {
 	if len(entries) > 0 {
 		rn.committedEntryIdx = entries[len(entries)-1].Index
 	} else {
-		rn.chanCommit <- ""
+		doSnapshotLog := OpLog{Op: DoSnap}
+		logBuf := bytes.Buffer{}
+		if err = gob.NewEncoder(&logBuf).Encode(doSnapshotLog); err != nil {
+			log.Panicf("fail to send `doSnap` to kv-storage: %s", err)
+		}
+		logBufStr := logBuf.String()
+		rn.chanCommit <- &logBufStr
 	}
 
 	return w, nil
@@ -206,7 +220,7 @@ func (rn *raftNode) openWAL(snapshot *cRaftpb.Snapshot) (*cRaftWal.WAL, error) {
 	return w, nil
 }
 
-func (rn *raftNode) saveSnap(snp cRaftpb.Snapshot) error {
+func (rn *raftNode) saveSnapshot(snp cRaftpb.Snapshot) error {
 	walsnap := cRaftWalpb.Snapshot{
 		Index: snp.Metadata.Index,
 		Term:  snp.Metadata.Term,
@@ -218,6 +232,15 @@ func (rn *raftNode) saveSnap(snp cRaftpb.Snapshot) error {
 		return err
 	}
 	return rn.nodeWal.ReleaseLockTo(snp.Metadata.Index)
+}
+
+func (rn *raftNode) loadSnapshot() *cRaftpb.Snapshot {
+	snapshot, err := rn.snapShotter.Load()
+	if err != nil && err != cRaftSnap.ErrNoSnapshot {
+		log.Panicf("raft server #%d can't load snapshot: %s", rn.id, err.Error())
+	}
+
+	return snapshot
 }
 
 func (rn *raftNode) publishSnapshot(snp cRaftpb.Snapshot) {
@@ -234,7 +257,8 @@ func (rn *raftNode) publishSnapshot(snp cRaftpb.Snapshot) {
 	if err := gob.NewEncoder(&buf).Encode(snpOp); err != nil {
 		log.Panic(err)
 	}
-	rn.chanCommit <- buf.String()
+	bufStr := buf.String()
+	rn.chanCommit <- &bufStr
 
 	rn.confState = snp.Metadata.ConfState
 	rn.snapshotIdx = snp.Metadata.Index
@@ -256,7 +280,7 @@ func (rn *raftNode) runRaft() {
 		case rd := <-rn.node.Ready():
 			rn.nodeWal.Save(rd.HardState, rd.Entries)
 			if !cRaft.IsEmptySnap(rd.Snapshot) {
-				rn.saveSnap(rd.Snapshot)
+				rn.saveSnapshot(rd.Snapshot)
 				rn.nodeStorage.ApplySnapshot(rd.Snapshot)
 				rn.publishSnapshot(rd.Snapshot)
 			}
@@ -308,7 +332,7 @@ func (rn *raftNode) makeCommit(ents []cRaftpb.Entry, err error) error {
 			}
 			s := string(e.Data)
 			select {
-			case rn.chanCommit <- s:
+			case rn.chanCommit <- &s:
 			default:
 				return fmt.Errorf("invalid entry at idx:%d", i)
 			}
