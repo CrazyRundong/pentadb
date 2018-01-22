@@ -99,12 +99,19 @@ func NewNode(hostIP, basePath string, isJoin bool, peers []string) (*Node, error
 	}
 
 	chanPropose := make(chan string)
-	chanCommit, chanError, snapShotter := raft.NewRaftNode(nodeId, basePath, peersId, isJoin, chanPropose)
+	raftId, chanCommit, chanError, snapShotter := raft.NewRaftNode(nodeId, basePath, peersId, isJoin, chanPropose)
 
-	return &Node{
+	dbPath := fmt.Sprintf("%s/localDB_%d", basePath, raftId)
+	db, err := leveldb.OpenFile(dbPath, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	retNode := Node{
 		HostIP: hostIP,
 		State:  Running,
 		mutex:  new(sync.RWMutex),
+		DB:     db,
 
 		// bellow are channels for kv-node <-> Raft cluster
 		chanPropose:       chanPropose,
@@ -112,7 +119,11 @@ func NewNode(hostIP, basePath string, isJoin bool, peers []string) (*Node, error
 		chanError:         chanError,
 		chanInternalError: make(chan error),
 		snapShotter:       <-snapShotter,
-	}, nil
+	}
+	go retNode.handleCommit()
+	go retNode.handleError()
+
+	return &retNode, nil
 }
 
 func (n *Node) randomChoice(list []string, k int) []string {
@@ -213,7 +224,7 @@ func (n *Node) Delete(key string, result *[]byte) error {
 	return nil
 }
 
-func (n *Node) HandleCommit() {
+func (n *Node) handleCommit() {
 	for data := range n.chanCommit {
 		var kvOp raft.OpLog
 		if err := gob.NewDecoder(bytes.NewBufferString(*data)).Decode(&kvOp); err != nil {
@@ -231,23 +242,25 @@ func (n *Node) HandleCommit() {
 			n.mutex.Unlock()
 		case raft.DoSnap:
 			// TODO: handle snapshot
+			err := fmt.Errorf("server node: handle snapshot not implemented")
+			n.chanInternalError <- err
 		default:
-			err := errors.New(fmt.Sprintf("Invalid operation (%v) in Node %s", kvOp, n.HostIP))
+			err := fmt.Errorf("invalid operation (%v) in Node %s", kvOp, n.HostIP)
 			n.chanInternalError <- err
 		}
 	}
 }
 
-func (n *Node) HandleError() {
+func (n *Node) handleError() {
 	var (
 		err error
 	)
 	for {
 		select {
 		case err = <-n.chanError:
-			LOG.Errorf("kv-storage get error from raft node: %s", err)
+			LOG.Errorf("raft node error: %s\n", err)
 		case err = <-n.chanInternalError:
-			LOG.Errorf("kv-storage get error from raft node: %s", err)
+			LOG.Errorf("server node internal error: %s\n", err)
 		}
 	}
 }
@@ -264,7 +277,7 @@ func ipToNodeId(ipAdd string) (uint64, error) {
 	ip := net.ParseIP(ipToken[0])
 	port, err := strconv.Atoi(ipToken[1])
 	if ip == nil || err != nil {
-		return 0, errors.New(fmt.Sprintf("Can't parse ip add: %s", ipAdd))
+		return 0, fmt.Errorf("can't parse ip add: %s", ipAdd)
 	}
 
 	var nodeId uint64

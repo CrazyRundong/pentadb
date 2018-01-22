@@ -16,8 +16,7 @@ import (
 
 func TestNewClient(t *testing.T) {
 	var nodes = []string{
-		"10.20.204.75:4567",
-		"10.19.126.55:4567",
+		"127.0.0.1:4567",
 	}
 	client, err := NewClient(nodes, nil, 1)
 	if err != nil {
@@ -28,14 +27,15 @@ func TestNewClient(t *testing.T) {
 	if len(client.nodes) != len(nodes) {
 		t.Error("wrong node number")
 	}
-	client.Put([]byte("p"), []byte("v"))
-	if value := client.Get([]byte("p")); value == nil {
-		t.Error("wrong get")
+
+	var (
+		testKey = "key_1"
+		testVal = "val_1"
+	)
+	client.Put(testKey, testVal)
+	if value := client.Get(testKey); value != testVal {
+		t.Errorf("get %s, expect %s", value, testVal)
 	} else {
 		LOG.Debug("value: ", value)
 	}
 }
-
-
-
-

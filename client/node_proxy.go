@@ -36,8 +36,9 @@ package client
 
 import (
 	"sync"
-	"github.com/shenaishiren/pentadb/opt"
+
 	"github.com/shenaishiren/pentadb/args"
+	"github.com/shenaishiren/pentadb/opt"
 	nrpc "github.com/shenaishiren/pentadb/rpc"
 )
 
@@ -53,8 +54,8 @@ func NewNodeProxy(node *Node) *NodeProxy {
 		return nil
 	}
 	return &NodeProxy{
-		node:          node,
-		mu:            new(sync.Mutex),
+		node: node,
+		mu:   new(sync.Mutex),
 	}
 }
 
@@ -86,9 +87,9 @@ func (np *NodeProxy) Init(nodeIpaddrs []string, replicas int, unreachableChan ch
 		}
 	}
 	args := &args.InitArgs{
-		Self: np.node.Ipaddr,
+		Self:       np.node.Ipaddr,
 		OtherNodes: otherNodes,
-		Replicas: replicas,
+		Replicas:   replicas,
 	}
 	np.call("Node.Init", args, unreachableChan)
 }
@@ -101,15 +102,15 @@ func (np *NodeProxy) RemoveNode(nodeIpaddr string, unreachableChan chan string) 
 	np.call("Node.RemoveNode", nodeIpaddr, unreachableChan)
 }
 
-func (np *NodeProxy) Put(key []byte, value []byte, unreachableChan chan string) {
-	kvArgs := &args.KVArgs{Key:key, Value: value}
+func (np *NodeProxy) Put(key string, value string, unreachableChan chan string) {
+	kvArgs := &args.KVArgs{Key: key, Value: value}
 	np.call("Node.Put", kvArgs, unreachableChan)
 }
 
-func (np *NodeProxy) Get(key []byte, unreachableChan chan string) []byte {
-	return np.call("Node.Get", key, unreachableChan)
+func (np *NodeProxy) Get(key string, unreachableChan chan string) string {
+	return string(np.call("Node.Get", key, unreachableChan))
 }
 
-func (np *NodeProxy) Delete(key []byte, unreachableChan chan string) {
+func (np *NodeProxy) Delete(key string, unreachableChan chan string) {
 	np.call("Node.Delete", key, unreachableChan)
 }

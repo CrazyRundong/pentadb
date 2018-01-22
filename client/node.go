@@ -62,11 +62,20 @@ type Node struct {
 }
 
 func NewNode(ipaddr string, weight int) *Node {
+	var (
+		nodeUuid uuid.UUID
+		err      error
+	)
+
+	if nodeUuid, err = uuid.NewV1(); err != nil {
+		LOG.Error(err.Error())
+	}
+
 	node := &Node{
-		Name:     uuid.NewV1().String(),
-		Ipaddr:   ipaddr,
-		Ctime:    time.Now(),
-		Weight:   weight,
+		Name:   nodeUuid.String(),
+		Ipaddr: ipaddr,
+		Ctime:  time.Now(),
+		Weight: weight,
 	}
 	// check whether this node is connectable or not
 	// TODO

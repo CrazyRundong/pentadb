@@ -117,9 +117,9 @@ func (c *Client) RemoveNode(nodeName string) {
 	}
 }
 
-func (c *Client) Put(key []byte, value []byte) {
+func (c *Client) Put(key string, value string) {
 	// choose a node
-	hashKey := KemataHash(Md5Hash(key), 0)
+	hashKey := KemataHash(Md5Hash([]byte(key)), 0)
 	node, err := c.hashRing.findProperNode(hashKey)
 	if err != nil {
 		LOG.Error("error occurred when find proper node: ", err.Error())
@@ -128,18 +128,18 @@ func (c *Client) Put(key []byte, value []byte) {
 	node.rNode.Proxy.Put(key, value, c.unreachableChan)
 }
 
-func (c *Client) Get(key []byte) []byte {
-	hashKey := KemataHash(Md5Hash(key), 0)
+func (c *Client) Get(key string) string {
+	hashKey := KemataHash(Md5Hash([]byte(key)), 0)
 	node, err := c.hashRing.findProperNode(hashKey)
 	if err != nil {
 		LOG.Error("error occurred when find proper node: ", err.Error())
-		return nil
+		return ""
 	}
 	return node.rNode.Proxy.Get(key, c.unreachableChan)
 }
 
-func (c *Client) Delete(key []byte) {
-	hashKey := KemataHash(Md5Hash(key), 0)
+func (c *Client) Delete(key string) {
+	hashKey := KemataHash(Md5Hash([]byte(key)), 0)
 	node, err := c.hashRing.findProperNode(hashKey)
 	if err != nil {
 		LOG.Error("error occurred when find proper node: ", err.Error())

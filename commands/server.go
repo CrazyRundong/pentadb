@@ -60,61 +60,63 @@ Options:
 `
 
 type Server struct {
-	Node *server.Node
+	Nodes []*server.Node
 }
 
 func (s *Server) listen(hostIP string, isJoin bool, peers []string, path string) {
 	var (
 		err error
+		n   *server.Node
 	)
 	port := strings.Split(hostIP, ":")[1]
 
-	if s.Node, err = server.NewNode(hostIP, path, isJoin, peers); err != nil {
+	if n, err = server.NewNode(hostIP, path, isJoin, peers); err != nil {
 		log.Panicf("fail to initalize reft server node: %s", err.Error())
 	}
 
-	db, err := leveldb.OpenFile(path + "/localDB", nil)
-
+	db, err := leveldb.OpenFile(path+"/localDB", nil)
 	if err != nil {
 		LOG.Error("open levelDB error: ", err.Error())
 		return
 	}
-	s.Node.DB = db
+	n.DB = db
 
-	rpc.Register(s.Node)
-	go s.Node.HandleCommit()
-	go s.Node.HandleError()
+	rpc.Register(n)
+	s.Nodes = append(s.Nodes, n)
 
-	l, err := net.Listen("tcp", ":" + port)
+	l, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		LOG.Error("listen error: ", err.Error())
 		return
 	}
 
-	LOG.Infof("listen at 0.0.0.0:%s", port)
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			LOG.Error("accept rpc connection", err.Error())
-			continue
+	go func() {
+		LOG.Infof("listen at 0.0.0.0:%s", port)
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				LOG.Error("accept rpc connection", err.Error())
+				continue
+			}
+			// blocking
+			go rpc.ServeConn(conn)
 		}
-		// blocking
-		go rpc.ServeConn(conn)
-	}
+	}()
 }
 
 func main() {
 	var (
-		help bool
+		help   bool
 		isJoin bool
-		peers string
-		port string
-		path string
+		peers  string
+		port   string
+		path   string
 	)
 	flag.BoolVar(&help, "h", false, "Display this help message and exit")
 	flag.BoolVar(&isJoin, "j", false, "whether to join another running cluster")
 	flag.StringVar(&peers, "p", "", "ip:port of peers, separated by `,`")
-	flag.StringVar(&port, "P", "4567", "The port to listen on (default: 4567)")
+	flag.StringVar(&port, "P", "4567", "The port to listen on (default: 4567),"+
+		"separated by `,` if launch multiple server nodes on one host")
 	flag.StringVar(&path, "a", opt.DeafultPath, "The path to use for the LevelDB store")
 
 	// change default usage
@@ -130,22 +132,29 @@ func main() {
 		fmt.Print(helpPrompt)
 	} else {
 		var (
-			hostIP string
-			peerIP []string
+			hostIPs   []net.IP
+			hostPorts []string
+			peerURLs  []string
+			hostURLs  []string
+			err       error
 		)
 
-		if ip, err := server.GetMyIP(); err != nil {
-			log.Panicf("fail to get server host ip: %s", err.Error())
-		} else {
-			hostIP = ip[0].String()
-			hostIP += ":" + port
+		if hostIPs, err = server.GetMyIP(); err != nil {
+			LOG.Errorf("fail to get server host ip: %s", err.Error())
+		}
+
+		hostPorts = strings.Split(port, ",")
+		for _, p := range hostPorts {
+			hostURLs = append(hostURLs, hostIPs[0].String()+":"+p)
 		}
 
 		if isJoin {
-			peerIP = strings.Split(peers, ",")
+			peerURLs = strings.Split(peers, ",")
 		}
 
 		svr := new(Server)
-		svr.listen(hostIP, isJoin, peerIP, path)
+		for _, u := range hostURLs {
+			svr.listen(u, isJoin, peerURLs, path)
+		}
 	}
 }

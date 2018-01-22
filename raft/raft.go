@@ -68,7 +68,7 @@ type raftNode struct {
 	transport *cRaftHttp.Transport
 }
 
-func NewRaftNode(id uint64, basePath string, peers []uint64, isJoin bool, chanPropose <-chan string) (<-chan *string, <-chan error, <-chan *cRaftSnap.Snapshotter) {
+func NewRaftNode(id uint64, basePath string, peers []uint64, isJoin bool, chanPropose <-chan string) (uint64, <-chan *string, <-chan error, <-chan *cRaftSnap.Snapshotter) {
 	memStorage := cRaft.NewMemoryStorage()
 	chanCommit := make(chan *string)
 	chanError := make(chan error)
@@ -90,7 +90,7 @@ func NewRaftNode(id uint64, basePath string, peers []uint64, isJoin bool, chanPr
 
 	go rNode.startRaft(isJoin)
 
-	return chanCommit, chanError, chanSnapShotterReady
+	return id, chanCommit, chanError, chanSnapShotterReady
 }
 
 func (rn *raftNode) startRaft(isJoin bool) {
